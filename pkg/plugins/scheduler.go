@@ -2,12 +2,16 @@ package plugins
 
 import (
 	"context"
-	"log"
-	"fmt"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"encoding/json"
+	"fmt"
+	"log"
+	"strconv"
+
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 type CustomSchedulerArgs struct {
@@ -15,7 +19,7 @@ type CustomSchedulerArgs struct {
 }
 
 type CustomScheduler struct {
-	handle 	framework.Handle
+	handle    framework.Handle
 	scoreMode string
 }
 
@@ -24,11 +28,11 @@ var _ framework.ScorePlugin = &CustomScheduler{}
 
 // Name is the name of the plugin used in Registry and configurations.
 const (
-	Name				string = "CustomScheduler"
-	groupNameLabel 		string = "podGroup"
-	minAvailableLabel 	string = "minAvailable"
-	leastMode			string = "Least"
-	mostMode			string = "Most"			
+	Name              string = "CustomScheduler"
+	groupNameLabel    string = "podGroup"
+	minAvailableLabel string = "minAvailable"
+	leastMode         string = "Least"
+	mostMode          string = "Most"
 )
 
 func (cs *CustomScheduler) Name() string {
@@ -66,8 +70,27 @@ func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.Cycle
 	// 1. extract the label of the pod
 	// 2. retrieve the pod with the same group label
 	// 3. justify if the pod can be scheduled
+	group_label := pod.Labels[groupNameLabel]
+	log.Printf("Pod label: %s", group_label)
 
-	return nil, newStatus
+	labelSet := map[string]string{groupNameLabel: group_label}
+	selector := labels.SelectorFromSet(labelSet)
+
+	pods, _ := cs.handle.SharedInformerFactory().Core().V1().Pods().Lister().List(selector)
+	log.Printf("Pods len: %d", len(pods))
+
+	min_count, err := strconv.Atoi(pod.Labels[minAvailableLabel])
+	if err != nil {
+		newStatus := framework.NewStatus(framework.Error, "strconv.Atoi(pod.Labels[minAvailableLabel]) error")
+		return nil, newStatus
+	}
+
+	if len(pods) >= min_count {
+		return nil, newStatus
+	} else {
+		newStatus = framework.NewStatus(framework.Unschedulable, "")
+		return &framework.PreFilterResult{NodeNames: sets.NewString()}, newStatus
+	}
 }
 
 // PreFilterExtensions returns a PreFilterExtensions interface if the plugin implements one.
@@ -75,24 +98,66 @@ func (cs *CustomScheduler) PreFilterExtensions() framework.PreFilterExtensions {
 	return nil
 }
 
-
 // Score invoked at the score extension point.
 func (cs *CustomScheduler) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
 	log.Printf("Pod %s is in Score phase. Calculate the score of Node %s.", pod.Name, nodeName)
-
+	newStatus := framework.NewStatus(framework.Success, "")
 	// TODO
 	// 1. retrieve the node allocatable memory
 	// 2. return the score based on the scheduler mode
-	
-	return 0, nil
+	nodeInfo, err := cs.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
+	if err != nil {
+		newStatus := framework.NewStatus(framework.Error, err.Error())
+		return 0, newStatus
+	}
+	allocatableMemory := nodeInfo.Allocatable.Memory
+	requestedMemory := nodeInfo.Requested.Memory
+	memory := allocatableMemory - requestedMemory
+
+	log.Printf("Node %s allocatable memory: %d, requested memory: %d, memory: %d", nodeName, allocatableMemory, requestedMemory, memory)
+
+	if cs.scoreMode == leastMode {
+		return -memory, newStatus
+	} else {
+		return memory, newStatus
+	}
 }
 
 // ensure the scores are within the valid range
 func (cs *CustomScheduler) NormalizeScore(ctx context.Context, state *framework.CycleState, pod *v1.Pod, scores framework.NodeScoreList) *framework.Status {
 	// TODO
 	// find the range of the current score and map to the valid range
+	if len(scores) == 0 {
+		return framework.NewStatus(framework.Error, "no scores to normalize")
+	}
+	newStatus := framework.NewStatus(framework.Success, "")
 
-	return nil
+	// 找到分数的最小值和最大值
+	minScore := scores[0].Score
+	maxScore := scores[0].Score
+	for _, score := range scores {
+		log.Printf("Pod %s. Node %s's socre %d", pod.Name, score.Name, score.Score)
+		if score.Score < minScore {
+			minScore = score.Score
+		}
+		if score.Score > maxScore {
+			maxScore = score.Score
+		}
+	}
+
+	// 避免最大值和最小值相同的情况（防止除以零）
+	if maxScore == minScore {
+		for i := range scores {
+			scores[i].Score = 0
+		}
+		return newStatus
+	}
+
+	for i := range scores {
+		scores[i].Score = framework.MinNodeScore + (scores[i].Score-minScore)*(framework.MaxNodeScore-framework.MinNodeScore)/(maxScore-minScore)
+	}
+
+	return newStatus
 }
 
 // ScoreExtensions of the Score plugin.

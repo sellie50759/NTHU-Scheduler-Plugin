@@ -15,5 +15,32 @@ deploy:
 remove:
 	helm uninstall scheduler-plugins
 
+testPrefilter:
+	kubectl create -f test/prefilter.yaml
+	@sleep 2
+	kubectl get po -o wide
+	kubectl get pods --no-headers -o custom-columns=":metadata.name" | grep my-scheduler \
+	 | xargs kubectl logs | grep log
+	# $(MAKE) testClean
+
+testLeastMode:
+	kubectl create -f test/least_mode.yaml
+	@sleep 2
+	kubectl get po -o wide
+	kubectl get pods --no-headers -o custom-columns=":metadata.name" | grep my-scheduler \
+	 | xargs kubectl logs | grep log
+	# $(MAKE) testClean
+
+testMostMode:
+	kubectl create -f test/most_mode.yaml
+	@sleep 2
+	kubectl get po -o wide
+	kubectl get pods --no-headers -o custom-columns=":metadata.name" | grep my-scheduler \
+	 | xargs kubectl logs | grep log
+	# $(MAKE) testClean
+
+testClean:
+	kubectl delete pod --all
+
 clean:
 	rm -rf bin/
